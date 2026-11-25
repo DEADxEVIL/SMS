@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""
-DEADxOSINT Phone Signup Manager
-A local directory, browser launcher, and manual OTP tracker.
-Does NOT submit phone numbers or request/send OTPs automatically.
-"""
+# DEADxOSINT - Termux Bulk Signup Page Launcher
+# Opens official signup pages for manual use. It does NOT submit forms,
+# request OTPs, read SMS, bypass CAPTCHAs, or automate account creation.
 
 import json
 import os
-import re
+import shutil
+import subprocess
 import sys
+import time
 import webbrowser
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-APP_NAME = "DEADxOSINT Phone Signup Manager"
-DATA_DIR = Path.home() / ".deadxosint_phone_manager"
-DATA_FILE = DATA_DIR / "records.json"
+APP = "DEADxOSINT"
+VERSION = "1.0"
+BASE_DIR = Path.home() / ".deadxosint"
+SETTINGS_FILE = BASE_DIR / "settings.json"
+HISTORY_FILE = BASE_DIR / "launch_history.json"
 
-# Directory links are starting points only. A service may require email,
-# an app, regional eligibility, or additional verification.
+# Directory links are entry points, not a guarantee that phone signup is supported.
 SITES = [
     ("Facebook", "Social", "https://www.facebook.com/r.php"),
     ("Instagram", "Social", "https://www.instagram.com/accounts/emailsignup/"),
@@ -88,7 +88,7 @@ SITES = [
     ("MakeMyTrip", "Travel", "https://www.makemytrip.com/"),
     ("Yatra", "Travel", "https://www.yatra.com/"),
     ("IRCTC", "Travel", "https://www.irctc.co.in/"),
-    (" redBus", "Travel", "https://www.redbus.in/"),
+    ("redBus", "Travel", "https://www.redbus.in/"),
     ("EaseMyTrip", "Travel", "https://www.easemytrip.com/"),
     ("Slack", "Productivity", "https://slack.com/get-started"),
     ("Zoom", "Productivity", "https://zoom.us/signup"),
@@ -147,182 +147,258 @@ SITES = [
     ("Tata 1mg", "Health services", "https://www.1mg.com/"),
 ]
 
-STATUSES = ("Pending", "Received", "Verified", "Not required")
+# ANSI colors work in most Termux terminals.
+C = {
+    "reset": "\033[0m", "cyan": "\033[96m", "green": "\033[92m",
+    "yellow": "\033[93m", "red": "\033[91m", "magenta": "\033[95m",
+    "bold": "\033[1m", "dim": "\033[2m"
+}
 
+def color(text, name):
+    return f"{C.get(name, '')}{text}{C['reset']}"
 
-def load_records():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not DATA_FILE.exists():
-        return {}
+def clear():
+    os.system("clear")
+
+def slow_print(text, delay=0.012):
+    for ch in text:
+        print(ch, end="", flush=True)
+        time.sleep(delay)
+    print()
+
+def spinner(message, duration=1.0):
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    end = time.time() + duration
+    i = 0
+    while time.time() < end:
+        print(f"\r{color(frames[i % len(frames)], 'cyan')} {message}", end="", flush=True)
+        time.sleep(0.08)
+        i += 1
+    print("\r" + " " * (len(message) + 4) + "\r", end="", flush=True)
+
+def banner():
+    clear()
+    art = r"""
+ ____  _____ ____  ____  __   __
+|  _ \| ____|  _ \|  _ \ \ \ / /
+| | | |  _| | | | | |_) | \ V /
+| |_| | |___| |_| |  __/   | |
+|____/|_____|____/|_|      |_|
+"""
+    print(color(art, "cyan"))
+    print(color("        PHONE SIGNUP PAGE LAUNCHER", "magenta"))
+    print(color(f"        Version {VERSION} | Termux / Android", "dim"))
+    print(color("─" * 48, "cyan"))
+    print(color("Manual signup only • No automatic OTP requests", "yellow"))
+    print()
+
+def ensure_data():
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+def load_json(path, default):
+    ensure_data()
     try:
-        with DATA_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        print("Warning: could not read saved records; starting with an empty tracker.")
-        return {}
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default
 
-
-def save_records(records):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    temp = DATA_FILE.with_suffix(".tmp")
+def save_json(path, data):
+    ensure_data()
+    temp = path.with_suffix(".tmp")
     with temp.open("w", encoding="utf-8") as f:
-        json.dump(records, f, indent=2, ensure_ascii=False)
-    temp.replace(DATA_FILE)
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    temp.replace(path)
 
+def get_settings():
+    settings = load_json(SETTINGS_FILE, {})
+    return {"interval": settings.get("interval", 5), "launch_mode": settings.get("launch_mode", "interval")}
 
-def input_nonempty(prompt):
-    while True:
-        value = input(prompt).strip()
-        if value:
-            return value
-
+def open_url(url):
+    # Android intent opens the user's default browser from Termux.
+    if shutil.which("am"):
+        try:
+            result = subprocess.run(
+                ["am", "start", "-a", "android.intent.action.VIEW", "-d", url],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8
+            )
+            return result.returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            pass
+    try:
+        return bool(webbrowser.open_new_tab(url))
+    except Exception:
+        return False
 
 def show_sites(items):
     if not items:
-        print("No matching websites.")
+        print(color("No websites found.", "yellow"))
         return
-    for idx, (name, category, url) in enumerate(items, 1):
-        print(f"{idx:3}. [{category}] {name} — {url}")
+    for i, (name, category, url) in enumerate(items, 1):
+        print(f"{color(f'{i:03}', 'cyan')}  {color(name, 'bold')} {color('[' + category + ']', 'dim')}")
+        print(f"     {color(url, 'dim')}")
 
-
-def choose_sites(items):
+def select_by_numbers(items):
     show_sites(items)
     if not items:
         return []
-    raw = input("\nEnter numbers separated by commas (e.g. 1,3,5), or 'a' for all: ").strip().lower()
+    raw = input("\nSelect numbers (e.g. 1,3,5) or A for all: ").strip().lower()
     if raw == "a":
-        return items
-    chosen = []
+        return list(items)
+    selected = []
     for part in raw.split(","):
         part = part.strip()
         if part.isdigit() and 1 <= int(part) <= len(items):
-            chosen.append(items[int(part) - 1])
-    # preserve order, remove duplicates
-    unique = []
-    seen = set()
-    for item in chosen:
-        if item[0] not in seen:
-            unique.append(item)
-            seen.add(item[0])
-    return unique
+            selected.append(items[int(part) - 1])
+    # unique, preserve order
+    seen, result = set(), []
+    for site in selected:
+        if site[0] not in seen:
+            result.append(site)
+            seen.add(site[0])
+    return result
 
-
-def open_sites(items):
+def launch_batch(items, settings):
     if not items:
+        print(color("Nothing selected.", "yellow"))
         return
-    print(f"\nOpening {len(items)} selected signup page(s) in your browser...")
-    for name, _, url in items:
+    interval = settings["interval"]
+    print(color(f"\nReady to open {len(items)} signup pages.", "cyan"))
+    print(color("The script only opens pages. It does not enter numbers, click Send OTP, or submit forms.", "yellow"))
+    confirm = input("Continue? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    history = load_json(HISTORY_FILE, [])
+    opened = 0
+    failed = 0
+    for index, (name, category, url) in enumerate(items, 1):
+        print(f"\n{color(f'[{index}/{len(items)}]', 'cyan')} Opening {color(name, 'bold')}...")
+        ok = open_url(url)
+        if ok:
+            opened += 1
+            print(color("  Browser launch requested.", "green"))
+            history.append({
+                "site": name, "url": url,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "launched"
+            })
+        else:
+            failed += 1
+            print(color("  Could not launch automatically. Open this URL manually:", "red"))
+            print(url)
+            history.append({
+                "site": name, "url": url,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "result": "launch_failed"
+            })
+        save_json(HISTORY_FILE, history[-500:])
+        if index < len(items):
+            if interval == 0:
+                continue
+            for remaining in range(interval, 0, -1):
+                print(f"\rNext page in {remaining}s... (Ctrl+C to stop)", end="", flush=True)
+                time.sleep(1)
+            print()
+    print(color("\nLaunch batch finished.", "green"))
+    print(f"Opened/requested: {opened} | Failed: {failed}")
+    print("Complete signup and OTP verification manually in the browser.")
+
+def search_sites():
+    term = input("Search website/category: ").strip().lower()
+    if not term:
+        return
+    matches = [s for s in SITES if term in s[0].lower() or term in s[1].lower()]
+    show_sites(matches)
+    input("\nPress Enter to continue...")
+
+def category_menu():
+    cats = sorted({s[1] for s in SITES})
+    print("\nCategories:")
+    for i, cat in enumerate(cats, 1):
+        count = sum(1 for s in SITES if s[1] == cat)
+        print(f"{i:2}. {cat} ({count})")
+    raw = input("Choose category number: ").strip()
+    if raw.isdigit() and 1 <= int(raw) <= len(cats):
+        return [s for s in SITES if s[1] == cats[int(raw) - 1]]
+    print(color("Invalid category.", "red"))
+    return []
+
+def settings_menu(settings):
+    print("\nLaunch interval:")
+    print("0. Open pages without delay")
+    print("5. 5 seconds (default)")
+    print("10. 10 seconds")
+    print("30. 30 seconds")
+    raw = input(f"Choose seconds [current {settings['interval']}]: ").strip()
+    if raw:
         try:
-            opened = webbrowser.open_new_tab(url)
-            print(f"  {'Opened' if opened else 'Tried'}: {name}")
-        except Exception as exc:
-            print(f"  Could not open {name}: {exc}")
-    print("Complete any signup and OTP step yourself on each official website.")
-
-
-def add_or_update_record(records):
-    site = input_nonempty("Website/service name: ")
-    phone = input_nonempty("Your phone number (include country code): ")
-    if len(phone) > 40:
-        print("Phone entry is too long.")
-        return
-    status = input("Status [Pending/Received/Verified/Not required] (default Pending): ").strip().title() or "Pending"
-    if status not in STATUSES:
-        print("Invalid status.")
-        return
-    otp = ""
-    if status in ("Received", "Verified"):
-        otp = input("OTP (optional; stored locally in plain text): ").strip()
-    note = input("Note (optional): ").strip()
-    records[site.lower()] = {
-        "site": site,
-        "phone": phone,
-        "status": status,
-        "otp": otp,
-        "note": note,
-        "updated": datetime.now().isoformat(timespec="seconds"),
-    }
-    save_records(records)
-    print("Record saved locally.")
-
-
-def list_records(records):
-    if not records:
-        print("No tracked records yet.")
-        return
-    print("\nSaved records:")
-    for entry in sorted(records.values(), key=lambda x: x.get("site", "").lower()):
-        print(f"- {entry.get('site')} | {entry.get('phone')} | {entry.get('status')} | updated {entry.get('updated')}")
-        if entry.get("otp"):
-            print(f"    OTP: {entry['otp']}")
-        if entry.get("note"):
-            print(f"    Note: {entry['note']}")
-
-
-def delete_record(records):
-    if not records:
-        print("No records to delete.")
-        return
-    list_records(records)
-    key = input_nonempty("\nEnter exact website/service name to delete: ").lower()
-    if key in records:
-        del records[key]
-        save_records(records)
-        print("Record deleted.")
-    else:
-        print("No matching record.")
-
+            value = int(raw)
+            if value not in (0, 5, 10, 30):
+                raise ValueError
+            settings["interval"] = value
+            save_json(SETTINGS_FILE, settings)
+            print(color("Settings saved.", "green"))
+        except ValueError:
+            print(color("Choose 0, 5, 10, or 30.", "red"))
+    input("Press Enter to continue...")
 
 def main():
-    records = load_records()
+    settings = get_settings()
     while True:
-        print(f"\n=== {APP_NAME} ===")
-        print(f"Website directory: {len(SITES)} entries")
-        print("1. List all websites")
-        print("2. Search websites")
-        print("3. Filter by category")
-        print("4. Open selected signup pages")
-        print("5. Add/update manual OTP record")
-        print("6. View saved records")
-        print("7. Delete a saved record")
-        print("0. Exit")
-        choice = input("\nSelect: ").strip()
+        banner()
+        print(f"Website directory: {color(str(len(SITES)), 'green')} entries")
+        print(f"Delay between launches: {color(str(settings['interval']) + ' seconds', 'cyan')}")
+        print()
+        print(color("[1]", "cyan"), "Open ALL websites")
+        print(color("[2]", "cyan"), "Select websites to open")
+        print(color("[3]", "cyan"), "Open a category")
+        print(color("[4]", "cyan"), "Search website directory")
+        print(color("[5]", "cyan"), "View all websites")
+        print(color("[6]", "cyan"), "Change launch interval")
+        print(color("[7]", "cyan"), "View launch history")
+        print(color("[0]", "red"), "Exit")
+        choice = input("\nDEADxOSINT > ").strip()
 
         if choice == "1":
-            show_sites(SITES)
+            launch_batch(SITES, settings)
+            input("\nPress Enter to return to menu...")
         elif choice == "2":
-            term = input_nonempty("Search name/category: ").lower()
-            matches = [s for s in SITES if term in s[0].lower() or term in s[1].lower()]
-            show_sites(matches)
+            selected = select_by_numbers(SITES)
+            launch_batch(selected, settings)
+            input("\nPress Enter to return to menu...")
         elif choice == "3":
-            categories = sorted({s[1] for s in SITES})
-            for i, cat in enumerate(categories, 1):
-                print(f"{i}. {cat}")
-            raw = input("Category number: ").strip()
-            if raw.isdigit() and 1 <= int(raw) <= len(categories):
-                show_sites([s for s in SITES if s[1] == categories[int(raw) - 1]])
-            else:
-                print("Invalid category.")
+            selected = category_menu()
+            if selected:
+                launch_batch(selected, settings)
+            input("\nPress Enter to return to menu...")
         elif choice == "4":
-            selected = choose_sites(SITES)
-            open_sites(selected)
+            search_sites()
         elif choice == "5":
-            add_or_update_record(records)
+            banner()
+            show_sites(SITES)
+            input("\nPress Enter to return to menu...")
         elif choice == "6":
-            list_records(records)
+            settings_menu(settings)
         elif choice == "7":
-            delete_record(records)
+            history = load_json(HISTORY_FILE, [])
+            print("\nRecent launch history:")
+            for row in history[-30:]:
+                print(f"{row.get('time')} | {row.get('site')} | {row.get('result')}")
+            if not history:
+                print("No launch history yet.")
+            input("\nPress Enter to continue...")
         elif choice == "0":
-            print("Exiting.")
+            print(color("Exiting DEADxOSINT.", "cyan"))
             break
         else:
-            print("Invalid choice.")
-
+            print(color("Invalid option.", "red"))
+            time.sleep(0.8)
 
 if __name__ == "__main__":
     try:
         main()
-    except (KeyboardInterrupt, EOFError):
-        print("\nExiting.")
+    except KeyboardInterrupt:
+        print("\n" + color("Stopped by user.", "yellow"))
         sys.exit(0)
